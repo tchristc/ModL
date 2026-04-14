@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="ModL.ConsoleApp/ModL.ConsoleApp.csproj" />
+  <Project Path="ModL.Core/ModL.Core.csproj" />
+  <Project Path="ModL.Data/ModL.Data.csproj" />
+  <Project Path="ModL.Generator/ModL.Generator.csproj" />
+  <Project Path="ModL.ML/ModL.ML.csproj" />
+</Solution>
