@@ -5,7 +5,7 @@ using ModL.Data.Datasets;
 using ModL.Data.Pipeline;
 using ModL.Core.IO;
 using ModL.Data.Annotations;
-using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp;
 
 namespace ModL.ConsoleApp;
 
@@ -25,7 +25,7 @@ class Program
             AnsiConsole.Write(
                 new FigletText("ModL Training")
                     .LeftJustified()
-                    .Color(Color.Green));
+                    .Color(Spectre.Console.Color.Green));
 
             AnsiConsole.MarkupLine("[dim]3D Model AI Training System[/]");
             AnsiConsole.WriteLine();
@@ -305,5 +305,4 @@ class ExportCommand
         AnsiConsole.MarkupLine("[yellow]Export not yet implemented[/]");
         return Task.FromResult(0);
     }
-}
 }
