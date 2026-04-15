@@ -49,6 +49,7 @@ public static class ModelIOFactory
     {
         // Register default loaders and exporters
         RegisterLoader(new ObjLoader());
+        RegisterLoader(new OffLoader());
         RegisterExporter(new ObjExporter());
     }
 
@@ -56,6 +57,9 @@ public static class ModelIOFactory
     {
         _loaders.Add(loader);
     }
+
+    public static string[] SupportedLoadExtensions
+        => _loaders.SelectMany(l => l.SupportedExtensions).Distinct().ToArray();
 
     public static void RegisterExporter(IModelExporter exporter)
     {

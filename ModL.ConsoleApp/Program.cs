@@ -6,6 +6,7 @@ using ModL.Data.Pipeline;
 using ModL.Core.IO;
 using ModL.Data.Annotations;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
 
 namespace ModL.ConsoleApp;
 
@@ -154,12 +155,15 @@ class PreprocessCommand
                 CalculateNormals = true
             };
 
-            // Find all model files
-            var modelFiles = Directory.GetFiles(InputDir, "*.obj", SearchOption.AllDirectories)
-                .Concat(Directory.GetFiles(InputDir, "*.fbx", SearchOption.AllDirectories))
+            // Find all model files for every format the factory can load
+            var supported = ModelIOFactory.SupportedLoadExtensions;
+            var modelFiles = supported
+                .SelectMany(ext => Directory.GetFiles(InputDir, $"*{ext}", SearchOption.AllDirectories))
+                .OrderBy(f => f)
                 .ToArray();
 
-            AnsiConsole.MarkupLine($"Found [yellow]{modelFiles.Length}[/] models");
+            AnsiConsole.MarkupLine($"Found [yellow]{modelFiles.Length}[/] models " +
+                $"([dim]{string.Join(", ", supported)}[/])");
 
             var processor = new DataProcessor();
             var processed = 0;
@@ -238,7 +242,8 @@ class PreprocessCommand
             Directory.CreateDirectory(viewsDir);
             for (int i = 0; i < model.MultiViews.Length; i++)
             {
-                model.MultiViews[i].Save(Path.Combine(viewsDir, $"view_{i:D2}.png"));
+                using var fs = File.Create(Path.Combine(viewsDir, $"view_{i:D2}.png"));
+                model.MultiViews[i].Save(fs, new PngEncoder());
             }
         }
 

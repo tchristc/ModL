@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "Run": {
+      "commandName": "Project",
+      "commandLineArgs": ""
+    },
+    "Preprocess": {
+      "commandName": "Project",
+      "commandLineArgs": "preprocess ./input ./output --voxel-size 64 --views 12"
+    },
+    "Download Sharpnet": {
+      "commandName": "Project",
+      "commandLineArgs": "download shapenet ./datasets/shapenet"
+    },
+    "Download modelnet": {
+      "commandName": "Project",
+      "commandLineArgs": "download modelnet ./datasets/modelnet"
+    }
+  }
+}
