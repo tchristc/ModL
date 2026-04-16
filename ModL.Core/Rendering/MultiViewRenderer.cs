@@ -23,176 +23,230 @@ public class ViewConfiguration
 }
 
 /// <summary>
-/// Renders 3D models from multiple viewpoints
+/// Lighting configuration for the renderer
+/// </summary>
+public class LightingConfig
+{
+    /// <summary>Minimum scene brightness so unlit faces remain visible (0–1)</summary>
+    public float Ambient { get; set; } = 0.20f;
+
+    /// <summary>Direction the key (primary) light comes FROM, in world space</summary>
+    public Vector3 KeyLightDirection { get; set; } = Vector3.Normalize(new Vector3(-1f, 2f, 1.5f));
+
+    /// <summary>Contribution of the key light (0–1)</summary>
+    public float KeyLightStrength { get; set; } = 0.60f;
+
+    /// <summary>Direction the fill (secondary) light comes FROM, in world space</summary>
+    public Vector3 FillLightDirection { get; set; } = Vector3.Normalize(new Vector3(1f, -0.5f, -1f));
+
+    /// <summary>Contribution of the fill light (0–1)</summary>
+    public float FillLightStrength { get; set; } = 0.20f;
+
+    /// <summary>Base model colour (grey by default; tinted outputs are possible)</summary>
+    public Rgb24 ModelColor { get; set; } = new Rgb24(200, 200, 210);
+
+    /// <summary>Background colour</summary>
+    public Rgb24 BackgroundColor { get; set; } = new Rgb24(245, 245, 245);
+
+    public static LightingConfig Default => new();
+}
+
+/// <summary>
+/// Renders 3D models from multiple viewpoints using a software Lambertian rasterizer.
+/// Each triangle is filled with a shaded colour computed from ambient + key + fill lights.
+/// Back-face culling and painter's algorithm depth sorting keep the output clean.
 /// </summary>
 public class MultiViewRenderer
 {
-    /// <summary>
-    /// Renders a model from multiple standard viewpoints
-    /// </summary>
+    private readonly LightingConfig _lighting;
+
+    public MultiViewRenderer(LightingConfig? lighting = null)
+    {
+        _lighting = lighting ?? LightingConfig.Default;
+    }
+
+    // -----------------------------------------------------------------------
+    // Public API
+    // -----------------------------------------------------------------------
+
     public Image<Rgb24>[] RenderViews(Model3D model, ViewConfiguration[] views)
     {
         var images = new Image<Rgb24>[views.Length];
-
         for (int i = 0; i < views.Length; i++)
-        {
             images[i] = RenderView(model, views[i]);
-        }
-
         return images;
     }
 
-    /// <summary>
-    /// Renders a single view of the model
-    /// </summary>
     public Image<Rgb24> RenderView(Model3D model, ViewConfiguration view)
     {
+        var bg = new Color(_lighting.BackgroundColor);
         var image = new Image<Rgb24>(view.ImageWidth, view.ImageHeight);
-        
-        // Clear to white background
-        image.Mutate(ctx => ctx.Fill(Color.White));
+        image.Mutate(ctx => ctx.Fill(bg));
 
-        // Calculate view and projection matrices
-        var viewMatrix = CreateLookAtMatrix(view.CameraPosition, view.LookAt, view.Up);
-        var projMatrix = CreatePerspectiveMatrix(
+        var viewMatrix = Matrix4x4.CreateLookAt(view.CameraPosition, view.LookAt, view.Up);
+        var projMatrix = Matrix4x4.CreatePerspectiveFieldOfView(
             view.FieldOfView * MathF.PI / 180.0f,
             (float)view.ImageWidth / view.ImageHeight,
             view.NearPlane,
             view.FarPlane);
 
-        // Simple wireframe rendering
+        var mvp = viewMatrix * projMatrix;
+
         foreach (var mesh in model.Meshes)
-        {
-            RenderMeshWireframe(image, mesh, viewMatrix, projMatrix, view.ImageWidth, view.ImageHeight);
-        }
+            RenderMeshShaded(image, mesh, mvp, view.ImageWidth, view.ImageHeight);
 
         return image;
     }
 
-    private void RenderMeshWireframe(
-        Image<Rgb24> image,
-        Mesh mesh,
-        Matrix4x4 viewMatrix,
-        Matrix4x4 projMatrix,
-        int width,
-        int height)
-    {
-        var mvp = viewMatrix * projMatrix;
-        var projectedVertices = new Vector3[mesh.Vertices.Length];
+    // -----------------------------------------------------------------------
+    // Camera helpers
+    // -----------------------------------------------------------------------
 
-        // Project all vertices
-        for (int i = 0; i < mesh.Vertices.Length; i++)
+    public ViewConfiguration[] GetStandardViews(int count = 12, float distance = 3.0f)
+    {
+        if (count <= 0) count = 12;
+
+        var views = new ViewConfiguration[count];
+        for (int i = 0; i < count; i++)
         {
-            projectedVertices[i] = ProjectVertex(mesh.Vertices[i], mvp, width, height);
+            float angle     = 2f * MathF.PI * i / count;
+            float elevation = MathF.PI / 6f; // 30° above the equator
+
+            views[i] = new ViewConfiguration
+            {
+                CameraPosition = new Vector3(
+                    distance * MathF.Cos(angle)  * MathF.Cos(elevation),
+                    distance * MathF.Sin(elevation),
+                    distance * MathF.Sin(angle)  * MathF.Cos(elevation)),
+                LookAt = Vector3.Zero,
+                Up     = Vector3.UnitY
+            };
+        }
+        return views;
+    }
+
+    public ViewConfiguration[] GetOrthographicViews(float distance = 3.0f) => new[]
+    {
+        new ViewConfiguration { CameraPosition = new Vector3( 0,  0,  distance), Up =  Vector3.UnitY },
+        new ViewConfiguration { CameraPosition = new Vector3( 0,  0, -distance), Up =  Vector3.UnitY },
+        new ViewConfiguration { CameraPosition = new Vector3(-distance, 0, 0),   Up =  Vector3.UnitY },
+        new ViewConfiguration { CameraPosition = new Vector3( distance, 0, 0),   Up =  Vector3.UnitY },
+        new ViewConfiguration { CameraPosition = new Vector3( 0,  distance, 0),  Up =  Vector3.UnitZ },
+        new ViewConfiguration { CameraPosition = new Vector3( 0, -distance, 0),  Up = -Vector3.UnitZ }
+    };
+
+    // -----------------------------------------------------------------------
+    // Shaded rasterizer
+    // -----------------------------------------------------------------------
+
+    private readonly record struct ShadedTriangle(PointF A, PointF B, PointF C, float Depth, Rgb24 Color);
+
+    private void RenderMeshShaded(Image<Rgb24> image, Mesh mesh, Matrix4x4 mvp, int width, int height)
+    {
+        if (mesh.Indices.Length == 0 || mesh.Vertices.Length == 0)
+            return;
+
+        // Project every vertex once
+        var screen = new Vector3[mesh.Vertices.Length];
+        for (int i = 0; i < mesh.Vertices.Length; i++)
+            screen[i] = ProjectVertex(mesh.Vertices[i], mvp, width, height);
+
+        bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
+
+        var triangles = new List<ShadedTriangle>(mesh.Indices.Length / 3);
+
+        for (int i = 0; i < mesh.Indices.Length; i += 3)
+        {
+            int i0 = mesh.Indices[i];
+            int i1 = mesh.Indices[i + 1];
+            int i2 = mesh.Indices[i + 2];
+
+            var s0 = screen[i0];
+            var s1 = screen[i1];
+            var s2 = screen[i2];
+
+            // Discard triangles wholly outside the depth range
+            if (s0.Z <= 0f || s1.Z <= 0f || s2.Z <= 0f) continue;
+            if (s0.Z >= 1f && s1.Z >= 1f && s2.Z >= 1f) continue;
+
+            // Back-face culling via screen-space winding order
+            // A positive 2-D cross product means the face winds counter-clockwise
+            // in screen space (Y flipped), which means it faces away from us.
+            float cross = (s1.X - s0.X) * (s2.Y - s0.Y)
+                        - (s1.Y - s0.Y) * (s2.X - s0.X);
+            if (cross >= 0f) continue;
+
+            // Compute or fetch the face normal in world / object space
+            Vector3 normal;
+            if (hasNormals)
+            {
+                normal = Vector3.Normalize(
+                    mesh.Normals[i0] + mesh.Normals[i1] + mesh.Normals[i2]);
+            }
+            else
+            {
+                var e1 = mesh.Vertices[i1] - mesh.Vertices[i0];
+                var e2 = mesh.Vertices[i2] - mesh.Vertices[i0];
+                normal = Vector3.Normalize(Vector3.Cross(e1, e2));
+            }
+
+            // Lambertian shading: ambient + key diffuse + fill diffuse
+            float key  = MathF.Max(0f, Vector3.Dot(normal, _lighting.KeyLightDirection));
+            float fill = MathF.Max(0f, Vector3.Dot(normal, _lighting.FillLightDirection));
+            float intensity = MathF.Min(1f,
+                _lighting.Ambient
+                + _lighting.KeyLightStrength  * key
+                + _lighting.FillLightStrength * fill);
+
+            var color = ShadeColor(_lighting.ModelColor, intensity);
+
+            float depth = (s0.Z + s1.Z + s2.Z) / 3f;
+
+            triangles.Add(new ShadedTriangle(
+                new PointF(s0.X, s0.Y),
+                new PointF(s1.X, s1.Y),
+                new PointF(s2.X, s2.Y),
+                depth,
+                color));
         }
 
-        // Draw edges
+        // Painter's algorithm: draw far triangles first
+        triangles.Sort(static (a, b) => b.Depth.CompareTo(a.Depth));
+
         image.Mutate(ctx =>
         {
-            for (int i = 0; i < mesh.Indices.Length; i += 3)
+            foreach (var tri in triangles)
             {
-                var v0 = projectedVertices[mesh.Indices[i]];
-                var v1 = projectedVertices[mesh.Indices[i + 1]];
-                var v2 = projectedVertices[mesh.Indices[i + 2]];
-
-                // Check if triangle is in view
-                if (v0.Z > 0 && v0.Z < 1 && v1.Z > 0 && v1.Z < 1 && v2.Z > 0 && v2.Z < 1)
-                {
-                    DrawLine(ctx, v0, v1, Color.Black);
-                    DrawLine(ctx, v1, v2, Color.Black);
-                    DrawLine(ctx, v2, v0, Color.Black);
-                }
+                var pts = new[] { tri.A, tri.B, tri.C };
+                ctx.FillPolygon(new Color(tri.Color), pts);
             }
         });
     }
 
-    private Vector3 ProjectVertex(Vector3 vertex, Matrix4x4 mvp, int width, int height)
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    private static Vector3 ProjectVertex(Vector3 vertex, Matrix4x4 mvp, int width, int height)
     {
-        var transformed = Vector4.Transform(new Vector4(vertex, 1.0f), mvp);
-        
-        if (MathF.Abs(transformed.W) < 0.0001f)
-            return new Vector3(-1, -1, -1);
+        var clip = Vector4.Transform(new Vector4(vertex, 1f), mvp);
 
-        transformed /= transformed.W;
+        if (MathF.Abs(clip.W) < 1e-4f)
+            return new Vector3(-2f, -2f, -1f); // out of view
 
-        // NDC to screen space
-        var screenX = (transformed.X + 1) * 0.5f * width;
-        var screenY = (1 - transformed.Y) * 0.5f * height;
-        var depth = (transformed.Z + 1) * 0.5f;
+        var ndc = clip / clip.W;
 
-        return new Vector3(screenX, screenY, depth);
+        return new Vector3(
+            (ndc.X + 1f) * 0.5f * width,
+            (1f - ndc.Y) * 0.5f * height,  // Y is flipped in screen space
+            (ndc.Z + 1f) * 0.5f);
     }
 
-    private void DrawLine(IImageProcessingContext ctx, Vector3 start, Vector3 end, Color color)
+    private static Rgb24 ShadeColor(Rgb24 baseColor, float intensity)
     {
-        var p1 = new PointF(start.X, start.Y);
-        var p2 = new PointF(end.X, end.Y);
-        
-        ctx.DrawLine(color, 1.0f, p1, p2);
-    }
-
-    /// <summary>
-    /// Generates standard camera positions around the model
-    /// </summary>
-    public ViewConfiguration[] GetStandardViews(int count = 12, float distance = 3.0f)
-    {
-        var views = new List<ViewConfiguration>();
-
-        if (count <= 0)
-            count = 12;
-
-        // Generate views around the model in a circle
-        for (int i = 0; i < count; i++)
-        {
-            float angle = (float)(2 * Math.PI * i / count);
-            float elevation = MathF.PI / 6; // 30 degrees up
-
-            var cameraPos = new Vector3(
-                distance * MathF.Cos(angle) * MathF.Cos(elevation),
-                distance * MathF.Sin(elevation),
-                distance * MathF.Sin(angle) * MathF.Cos(elevation)
-            );
-
-            views.Add(new ViewConfiguration
-            {
-                CameraPosition = cameraPos,
-                LookAt = Vector3.Zero,
-                Up = Vector3.UnitY
-            });
-        }
-
-        return views.ToArray();
-    }
-
-    /// <summary>
-    /// Generates 6 orthographic views (front, back, left, right, top, bottom)
-    /// </summary>
-    public ViewConfiguration[] GetOrthographicViews(float distance = 3.0f)
-    {
-        return new[]
-        {
-            // Front
-            new ViewConfiguration { CameraPosition = new Vector3(0, 0, distance), Up = Vector3.UnitY },
-            // Back
-            new ViewConfiguration { CameraPosition = new Vector3(0, 0, -distance), Up = Vector3.UnitY },
-            // Left
-            new ViewConfiguration { CameraPosition = new Vector3(-distance, 0, 0), Up = Vector3.UnitY },
-            // Right
-            new ViewConfiguration { CameraPosition = new Vector3(distance, 0, 0), Up = Vector3.UnitY },
-            // Top
-            new ViewConfiguration { CameraPosition = new Vector3(0, distance, 0), Up = Vector3.UnitZ },
-            // Bottom
-            new ViewConfiguration { CameraPosition = new Vector3(0, -distance, 0), Up = -Vector3.UnitZ }
-        };
-    }
-
-    private Matrix4x4 CreateLookAtMatrix(Vector3 cameraPosition, Vector3 target, Vector3 up)
-    {
-        return Matrix4x4.CreateLookAt(cameraPosition, target, up);
-    }
-
-    private Matrix4x4 CreatePerspectiveMatrix(float fov, float aspectRatio, float nearPlane, float farPlane)
-    {
-        return Matrix4x4.CreatePerspectiveFieldOfView(fov, aspectRatio, nearPlane, farPlane);
+        return new Rgb24(
+            (byte)MathF.Round(baseColor.R * intensity),
+            (byte)MathF.Round(baseColor.G * intensity),
+            (byte)MathF.Round(baseColor.B * intensity));
     }
 }
