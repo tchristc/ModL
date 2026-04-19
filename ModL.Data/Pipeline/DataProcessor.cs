@@ -19,6 +19,28 @@ public class PreprocessingConfig
     public bool Center { get; set; } = true;
     public bool CalculateNormals { get; set; } = true;
     public string OutputFormat { get; set; } = "processed";
+    /// <summary>
+    /// When set, each processed model is saved to this directory via
+    /// <see cref="ProcessedModelStore"/>. Leave null to skip persistence.
+    /// </summary>
+    public string? OutputDir { get; set; }
+}
+
+/// <summary>
+/// Outcome of processing a single model.
+/// </summary>
+public record ProcessingResult(
+    string ModelId,
+    string FilePath,
+    bool Success,
+    ProcessedModel? Model,
+    Exception? Error)
+{
+    public static ProcessingResult Ok(string filePath, ProcessedModel model)
+        => new(model.ModelId, filePath, true, model, null);
+
+    public static ProcessingResult Fail(string filePath, Exception ex)
+        => new(Path.GetFileNameWithoutExtension(filePath), filePath, false, null, ex);
 }
 
 /// <summary>
@@ -37,17 +59,64 @@ public class ProcessedModel
 }
 
 /// <summary>
-/// Processes raw 3D models into ML-ready format
+/// Processes raw 3D models into ML-ready format.
+/// Optionally persists each result via <see cref="ProcessedModelStore"/>
+/// when <see cref="PreprocessingConfig.OutputDir"/> is set.
 /// </summary>
 public class DataProcessor
 {
     private readonly Voxelizer _voxelizer = new();
     private readonly MultiViewRenderer _renderer = new();
+    private readonly ProcessedModelStore _store = new();
 
     /// <summary>
-    /// Processes a single model
+    /// Processes a single model file path. Tries to infer an annotation from
+    /// folder structure (ModelNet, ShapeNet) when none is supplied.
+    /// Saves the result if <see cref="PreprocessingConfig.OutputDir"/> is set.
+    /// </summary>
+    public ProcessingResult ProcessFile(
+        string filePath,
+        ModelAnnotation? annotation,
+        PreprocessingConfig config)
+    {
+        try
+        {
+            var model = Core.IO.ModelIOFactory.LoadModel(filePath);
+
+            // Fall back to path-derived annotation when none supplied
+            annotation ??= AnnotationParserFactory.InferFromPath(filePath);
+
+            var processed = ProcessModel(model, annotation, config);
+
+            if (config.OutputDir != null)
+                _store.Save(processed, config.OutputDir);
+
+            return ProcessingResult.Ok(filePath, processed);
+        }
+        catch (Exception ex)
+        {
+            return ProcessingResult.Fail(filePath, ex);
+        }
+    }
+
+    /// <summary>
+    /// Processes an already-loaded model. Annotation inference from path is
+    /// not available here — call <see cref="ProcessFile"/> when you have a path.
     /// </summary>
     public ProcessedModel Process(
+        Model3D model,
+        ModelAnnotation? annotation,
+        PreprocessingConfig config)
+    {
+        var processed = ProcessModel(model, annotation, config);
+
+        if (config.OutputDir != null)
+            _store.Save(processed, config.OutputDir);
+
+        return processed;
+    }
+
+    private ProcessedModel ProcessModel(
         Model3D model,
         ModelAnnotation? annotation,
         PreprocessingConfig config)
@@ -105,7 +174,53 @@ public class DataProcessor
     }
 
     /// <summary>
-    /// Processes a batch of models in parallel
+    /// Processes a batch of file paths in parallel, returning one
+    /// <see cref="ProcessingResult"/> per input (successes and failures).
+    /// </summary>
+    public async Task<ProcessingResult[]> ProcessBatch(
+        IEnumerable<(string FilePath, ModelAnnotation? Annotation)> items,
+        PreprocessingConfig config,
+        IProgress<BatchProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var list    = items.ToList();
+        var results = new ProcessingResult[list.Count];
+        var completed = 0;
+        var failed    = 0;
+
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Environment.ProcessorCount,
+            CancellationToken      = cancellationToken
+        };
+
+        await Task.Run(() =>
+        {
+            Parallel.For(0, list.Count, options, i =>
+            {
+                var (filePath, annotation) = list[i];
+                results[i] = ProcessFile(filePath, annotation, config);
+
+                if (!results[i].Success)
+                    Interlocked.Increment(ref failed);
+
+                var currentCompleted = Interlocked.Increment(ref completed);
+                progress?.Report(new BatchProgress
+                {
+                    Current      = currentCompleted,
+                    Total        = list.Count,
+                    Failed       = failed,
+                    CurrentModel = Path.GetFileName(filePath)
+                });
+            });
+        }, cancellationToken);
+
+        return results;
+    }
+
+    /// <summary>
+    /// Overload that accepts pre-loaded Model3D instances (no path-based annotation
+    /// inference or auto-save; use the file-path overload when available).
     /// </summary>
     public async Task<ProcessedModel[]> ProcessBatch(
         IEnumerable<(Model3D Model, ModelAnnotation? Annotation)> models,
@@ -114,13 +229,13 @@ public class DataProcessor
         CancellationToken cancellationToken = default)
     {
         var modelList = models.ToList();
-        var results = new ProcessedModel[modelList.Count];
+        var results   = new ProcessedModel[modelList.Count];
         var completed = 0;
 
         var options = new ParallelOptions
         {
             MaxDegreeOfParallelism = Environment.ProcessorCount,
-            CancellationToken = cancellationToken
+            CancellationToken      = cancellationToken
         };
 
         await Task.Run(() =>
@@ -133,8 +248,8 @@ public class DataProcessor
                 var currentCompleted = Interlocked.Increment(ref completed);
                 progress?.Report(new BatchProgress
                 {
-                    Current = currentCompleted,
-                    Total = modelList.Count,
+                    Current      = currentCompleted,
+                    Total        = modelList.Count,
                     CurrentModel = model.Name
                 });
             });
@@ -182,6 +297,7 @@ public class BatchProgress
 {
     public int Current { get; set; }
     public int Total { get; set; }
+    public int Failed { get; set; }
     public string CurrentModel { get; set; } = string.Empty;
     public double PercentComplete => Total > 0 ? (double)Current / Total * 100 : 0;
 }

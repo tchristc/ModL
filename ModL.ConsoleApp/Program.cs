@@ -6,7 +6,6 @@ using ModL.Data.Pipeline;
 using ModL.Core.IO;
 using ModL.Data.Annotations;
 using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Png;
 
 namespace ModL.ConsoleApp;
 
@@ -34,15 +33,19 @@ class Program
             return await Parser.Default.ParseArguments<
                 DownloadCommand,
                 PreprocessCommand,
+                CatalogCommand,
+                SplitCommand,
                 TrainCommand,
                 EvaluateCommand,
                 ExportCommand>(args)
                 .MapResult(
-                    (DownloadCommand cmd) => cmd.ExecuteAsync(),
-                    (PreprocessCommand cmd) => cmd.ExecuteAsync(),
-                    (TrainCommand cmd) => cmd.ExecuteAsync(),
-                    (EvaluateCommand cmd) => cmd.ExecuteAsync(),
-                    (ExportCommand cmd) => cmd.ExecuteAsync(),
+                    (DownloadCommand cmd)    => cmd.ExecuteAsync(),
+                    (PreprocessCommand cmd)  => cmd.ExecuteAsync(),
+                    (CatalogCommand cmd)     => cmd.ExecuteAsync(),
+                    (SplitCommand cmd)       => cmd.ExecuteAsync(),
+                    (TrainCommand cmd)       => cmd.ExecuteAsync(),
+                    (EvaluateCommand cmd)    => cmd.ExecuteAsync(),
+                    (ExportCommand cmd)      => cmd.ExecuteAsync(),
                     errs => Task.FromResult(1));
         }
         catch (Exception ex)
@@ -150,13 +153,14 @@ class PreprocessCommand
             var config = new PreprocessingConfig
             {
                 VoxelResolution = VoxelSize,
-                MultiViewCount = Views,
-                Normalize = true,
-                CalculateNormals = true
+                MultiViewCount  = Views,
+                Normalize       = true,
+                CalculateNormals = true,
+                OutputDir       = OutputDir
             };
 
             // Find all model files for every format the factory can load
-            var supported = ModelIOFactory.SupportedLoadExtensions;
+            var supported  = ModelIOFactory.SupportedLoadExtensions;
             var modelFiles = supported
                 .SelectMany(ext => Directory.GetFiles(InputDir, $"*{ext}", SearchOption.AllDirectories))
                 .OrderBy(f => f)
@@ -166,39 +170,48 @@ class PreprocessCommand
                 $"([dim]{string.Join(", ", supported)}[/])");
 
             var processor = new DataProcessor();
-            var processed = 0;
+            int succeeded = 0, failed = 0;
 
             await AnsiConsole.Progress()
                 .StartAsync(async ctx =>
                 {
                     var task = ctx.AddTask("[green]Processing models[/]", maxValue: modelFiles.Length);
 
-                    foreach (var modelFile in modelFiles)
+                    // Build input list: try sidecar .json first, then path inference
+                    var inputs = modelFiles.Select(f =>
                     {
-                        try
+                        var jsonSidecar = Path.ChangeExtension(f, ".json");
+                        var ann = File.Exists(jsonSidecar)
+                            ? AnnotationParserFactory.Parse(jsonSidecar)
+                            : null;   // DataProcessor.ProcessFile will call InferFromPath
+                        return (f, ann);
+                    });
+
+                    var progressReporter = new Progress<BatchProgress>(p =>
+                    {
+                        task.Description = $"[green]Processing {p.CurrentModel}[/]";
+                        task.Value        = p.Current;
+                    });
+
+                    var results = await processor.ProcessBatch(
+                        inputs,
+                        config,
+                        progressReporter);
+
+                    foreach (var r in results)
+                    {
+                        if (r.Success) succeeded++;
+                        else
                         {
-                            task.Description = $"[green]Processing {Path.GetFileName(modelFile)}[/]";
-
-                            var model = ModelIOFactory.LoadModel(modelFile);
-                            var annotation = TryLoadAnnotation(modelFile);
-
-                            var result = processor.Process(model, annotation, config);
-
-                            // Save processed data
-                            var outputName = Path.GetFileNameWithoutExtension(modelFile);
-                            SaveProcessedModel(result, Path.Combine(OutputDir, outputName));
-
-                            processed++;
-                            task.Increment(1);
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.Warning(ex, "Failed to process {File}", modelFile);
+                            failed++;
+                            Log.Warning(r.Error, "Failed to process {File}", r.FilePath);
                         }
                     }
                 });
 
-            AnsiConsole.MarkupLine($"[green]✓ Processed {processed}/{modelFiles.Length} models![/]");
+            AnsiConsole.MarkupLine(
+                $"[green]✓ Processed {succeeded}/{modelFiles.Length} models[/]" +
+                (failed > 0 ? $" [yellow]({failed} failed)[/]" : string.Empty));
             return 0;
         }
         catch (Exception ex)
@@ -207,57 +220,6 @@ class PreprocessCommand
             AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
             return 1;
         }
-    }
-
-    private ModelAnnotation? TryLoadAnnotation(string modelFile)
-    {
-        var annotationFile = Path.ChangeExtension(modelFile, ".json");
-        if (File.Exists(annotationFile))
-        {
-            return AnnotationParserFactory.Parse(annotationFile);
-        }
-        return null;
-    }
-
-    private void SaveProcessedModel(ProcessedModel model, string outputPath)
-    {
-        Directory.CreateDirectory(outputPath);
-
-        // Save voxel grid
-        if (model.Voxels != null)
-        {
-            var voxelData = model.Voxels.ToFloatArray();
-            var voxelPath = Path.Combine(outputPath, "voxels.bin");
-            using var fs = File.Create(voxelPath);
-            using var bw = new BinaryWriter(fs);
-            bw.Write(model.Voxels.Resolution);
-            foreach (var v in voxelData)
-                bw.Write(v);
-        }
-
-        // Save multi-view images
-        if (model.MultiViews != null)
-        {
-            var viewsDir = Path.Combine(outputPath, "views");
-            Directory.CreateDirectory(viewsDir);
-            for (int i = 0; i < model.MultiViews.Length; i++)
-            {
-                using var fs = File.Create(Path.Combine(viewsDir, $"view_{i:D2}.png"));
-                model.MultiViews[i].Save(fs, new PngEncoder());
-            }
-        }
-
-        // Save metadata
-        var metadataPath = Path.Combine(outputPath, "metadata.json");
-        var metadata = new
-        {
-            model.ModelId,
-            model.Annotation?.Category,
-            model.Annotation?.Tags,
-            model.Metadata,
-            FeatureVector = model.FeatureVector
-        };
-        File.WriteAllText(metadataPath, Newtonsoft.Json.JsonConvert.SerializeObject(metadata, Newtonsoft.Json.Formatting.Indented));
     }
 }
 
@@ -309,5 +271,138 @@ class ExportCommand
     {
         AnsiConsole.MarkupLine("[yellow]Export not yet implemented[/]");
         return Task.FromResult(0);
+    }
+}
+
+[Verb("catalog", HelpText = "Scan a dataset directory and show category distribution")]
+class CatalogCommand
+{
+    [Value(0, Required = true, HelpText = "Dataset root directory")]
+    public string InputDir { get; set; } = string.Empty;
+
+    [Option("format", Default = "auto", HelpText = "Dataset format (auto, modelnet, shapenet)")]
+    public string Format { get; set; } = "auto";
+
+    public Task<int> ExecuteAsync()
+    {
+        try
+        {
+            if (!Directory.Exists(InputDir))
+            {
+                AnsiConsole.MarkupLine("[red]Input directory does not exist![/]");
+                return Task.FromResult(1);
+            }
+
+            var supported = ModelIOFactory.SupportedLoadExtensions;
+            var files = supported
+                .SelectMany(ext => Directory.GetFiles(InputDir, $"*{ext}", SearchOption.AllDirectories))
+                .OrderBy(f => f)
+                .ToArray();
+
+            AnsiConsole.MarkupLine($"Found [yellow]{files.Length}[/] model files in [dim]{InputDir}[/]");
+
+            // Tally categories via path inference
+            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var unannotated = 0;
+            foreach (var f in files)
+            {
+                var ann = AnnotationParserFactory.InferFromPath(f);
+                if (ann != null)
+                {
+                    var cat = ann.Category ?? "unknown";
+                    counts[cat] = counts.GetValueOrDefault(cat) + 1;
+                }
+                else
+                {
+                    unannotated++;
+                }
+            }
+
+            if (counts.Count == 0)
+            {
+                AnsiConsole.MarkupLine("[yellow]No category information could be inferred. Try specifying --format.[/]");
+                return Task.FromResult(0);
+            }
+
+            var table = new Spectre.Console.Table()
+                .AddColumn("Category")
+                .AddColumn(new Spectre.Console.TableColumn("Count").RightAligned())
+                .AddColumn(new Spectre.Console.TableColumn("%").RightAligned());
+
+            int total = counts.Values.Sum();
+            foreach (var (cat, count) in counts.OrderByDescending(x => x.Value))
+                table.AddRow(cat, count.ToString(), $"{100.0 * count / total:F1}%");
+
+            if (unannotated > 0)
+                table.AddRow("[dim]unannotated[/]", unannotated.ToString(), $"{100.0 * unannotated / files.Length:F1}%");
+
+            AnsiConsole.Write(table);
+            AnsiConsole.MarkupLine($"[dim]Total annotated: {total}  |  Categories: {counts.Count}[/]");
+            return Task.FromResult(0);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Catalog failed");
+            AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+            return Task.FromResult(1);
+        }
+    }
+}
+
+[Verb("split", HelpText = "Split a processed output directory into train/val/test index files")]
+class SplitCommand
+{
+    [Value(0, Required = true, HelpText = "Processed output directory (from preprocess command)")]
+    public string ProcessedDir { get; set; } = string.Empty;
+
+    [Option("train", Default = 0.8f, HelpText = "Training fraction (default 0.8)")]
+    public float Train { get; set; }
+
+    [Option("val", Default = 0.1f, HelpText = "Validation fraction (default 0.1)")]
+    public float Val { get; set; }
+
+    [Option("test", Default = 0.1f, HelpText = "Test fraction (default 0.1)")]
+    public float Test { get; set; }
+
+    [Option("seed", Default = 42, HelpText = "Random seed for reproducibility")]
+    public int Seed { get; set; }
+
+    public Task<int> ExecuteAsync()
+    {
+        try
+        {
+            if (!Directory.Exists(ProcessedDir))
+            {
+                AnsiConsole.MarkupLine("[red]Processed directory does not exist![/]");
+                return Task.FromResult(1);
+            }
+
+            var store   = new ProcessedModelStore();
+            var entries = store.LoadAll(ProcessedDir, loadViews: false).ToList();
+
+            if (entries.Count == 0)
+            {
+                AnsiConsole.MarkupLine("[yellow]No processed models found in directory.[/]");
+                return Task.FromResult(0);
+            }
+
+            var splitter = new DatasetSplitter(Train, Val, Test, Seed);
+            var split    = splitter.Split(entries, e => e.Annotation?.Category ?? "unknown");
+
+            File.WriteAllLines(Path.Combine(ProcessedDir, "train.txt"), split.Train.Select(e => e.ModelId));
+            File.WriteAllLines(Path.Combine(ProcessedDir, "val.txt"),   split.Val.Select(e => e.ModelId));
+            File.WriteAllLines(Path.Combine(ProcessedDir, "test.txt"),  split.Test.Select(e => e.ModelId));
+
+            AnsiConsole.MarkupLine("[green]✓ Split complete![/]");
+            split.PrintSummary();
+            AnsiConsole.MarkupLine($"[dim]Written: train.txt / val.txt / test.txt → {ProcessedDir}[/]");
+            return Task.FromResult(0);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Split failed");
+            AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+            return Task.FromResult(1);
+        }
     }
 }

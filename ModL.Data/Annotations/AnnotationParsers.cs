@@ -77,7 +77,9 @@ public class JsonAnnotationParser : IAnnotationParser
 }
 
 /// <summary>
-/// Factory for creating annotation parsers
+/// Factory for creating annotation parsers.
+/// JSON parsers are checked first; fallback parsers (ModelNet, ShapeNet)
+/// are tried when no sidecar .json annotation exists.
 /// </summary>
 public static class AnnotationParserFactory
 {
@@ -86,18 +88,34 @@ public static class AnnotationParserFactory
         new JsonAnnotationParser()
     };
 
+    // Fallback parsers that derive annotations from path/folder structure
+    private static readonly List<IAnnotationParser> _fallbackParsers = new()
+    {
+        new ModelNetAnnotationParser()
+    };
+
     public static ModelAnnotation Parse(string annotationFile)
     {
         var parser = _parsers.FirstOrDefault(p => p.CanParse(annotationFile));
-        
         if (parser == null)
             throw new NotSupportedException($"No parser found for file: {annotationFile}");
-
         return parser.Parse(annotationFile);
     }
 
-    public static void RegisterParser(IAnnotationParser parser)
+    /// <summary>
+    /// Attempts to derive an annotation from a model file path using
+    /// folder-structure parsers (ModelNet, ShapeNet). Returns null if
+    /// no matching parser is found.
+    /// </summary>
+    public static ModelAnnotation? InferFromPath(string modelFilePath)
     {
-        _parsers.Add(parser);
+        var parser = _fallbackParsers.FirstOrDefault(p => p.CanParse(modelFilePath));
+        return parser?.Parse(modelFilePath);
     }
+
+    public static void RegisterParser(IAnnotationParser parser)
+        => _parsers.Add(parser);
+
+    public static void RegisterFallbackParser(IAnnotationParser parser)
+        => _fallbackParsers.Add(parser);
 }

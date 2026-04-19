@@ -15,6 +15,14 @@
     "Download modelnet": {
       "commandName": "Project",
       "commandLineArgs": "download modelnet ./datasets/modelnet"
+    },
+    "Catalog Sharpnet": {
+      "commandName": "Project",
+      "commandLineArgs": "catalog ./datasets/shapenet --format shapenet"
+    },
+    "Catalog modelnet": {
+      "commandName": "Project",
+      "commandLineArgs": "catalog ./datasets/modelnet --format shapenet"
     }
   }
 }
