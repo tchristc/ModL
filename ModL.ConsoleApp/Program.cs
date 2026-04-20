@@ -5,6 +5,9 @@ using ModL.Data.Datasets;
 using ModL.Data.Pipeline;
 using ModL.Core.IO;
 using ModL.Data.Annotations;
+using ModL.ML.Data;
+using ModL.ML.Models;
+using ModL.ML.Training;
 using SixLabors.ImageSharp;
 
 namespace ModL.ConsoleApp;
@@ -223,54 +226,217 @@ class PreprocessCommand
     }
 }
 
-[Verb("train", HelpText = "Train the ML model")]
+[Verb("train", HelpText = "Train the ModL model")]
 class TrainCommand
 {
-    [Value(0, Required = true, HelpText = "Path to training configuration file")]
+    [Value(0, Required = true, HelpText = "Path to training config JSON (or processed dir for defaults)")]
     public string ConfigFile { get; set; } = string.Empty;
 
-    [Option("gpu", Default = 0, HelpText = "GPU device ID")]
-    public int GpuId { get; set; }
+    [Option("gpu", Default = false, HelpText = "Use CUDA GPU if available")]
+    public bool Gpu { get; set; }
 
-    [Option("resume", HelpText = "Resume from checkpoint")]
+    [Option("resume", HelpText = "Resume from this checkpoint directory")]
     public string? Checkpoint { get; set; }
 
-    public Task<int> ExecuteAsync()
+    [Option("epochs", Default = 0, HelpText = "Override epoch count from config")]
+    public int Epochs { get; set; }
+
+    public async Task<int> ExecuteAsync()
     {
-        AnsiConsole.MarkupLine("[yellow]Training not yet implemented - ML models coming in Sprint 3-4[/]");
-        return Task.FromResult(0);
+        try
+        {
+            TrainingConfig cfg;
+            if (File.Exists(ConfigFile))
+            {
+                cfg = TrainingConfig.FromJson(ConfigFile);
+            }
+            else if (Directory.Exists(ConfigFile))
+            {
+                cfg = TrainingConfig.Default(ConfigFile);
+                AnsiConsole.MarkupLine("[dim]No config file found — using defaults.[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[red]Config file or processed dir not found: {ConfigFile}[/]");
+                return 1;
+            }
+
+            if (Gpu)         cfg.Device     = "cuda";
+            if (Checkpoint != null) cfg.ResumeFrom = Checkpoint;
+            if (Epochs > 0)  cfg.Epochs     = Epochs;
+
+            AnsiConsole.MarkupLine(
+                $"[green]Training[/] · [dim]{cfg.Epochs} epochs · batch {cfg.BatchSize} · device {cfg.Device}[/]");
+
+            var trainer = new Trainer(cfg);
+            IReadOnlyList<EpochMetrics>? history = null;
+
+            await AnsiConsole.Progress()
+                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(),
+                         new PercentageColumn(), new ElapsedTimeColumn())
+                .StartAsync(async ctx =>
+                {
+                    var task = ctx.AddTask("[green]Training[/]", maxValue: cfg.Epochs);
+
+                    var progress = new Progress<TrainingProgress>(p =>
+                    {
+                        task.Value = p.CurrentEpoch;
+                        task.Description =
+                            $"[green]Epoch {p.CurrentEpoch}/{p.TotalEpochs}[/] " +
+                            $"loss={p.Metrics.TrainLoss:F4} val={p.Metrics.ValTop1Accuracy * 100:F1}%";
+                    });
+
+                    history = await trainer.TrainAsync(progress);
+                });
+
+            if (history != null && history.Count > 0)
+            {
+                var best = history.OrderByDescending(m => m.ValTop1Accuracy).First();
+                AnsiConsole.MarkupLine(
+                    $"[green]✓ Training complete![/]  Best val accuracy: [yellow]{best.ValTop1Accuracy * 100:F2}%[/] (epoch {best.Epoch})");
+                AnsiConsole.MarkupLine($"[dim]Checkpoints saved to: {cfg.CheckpointDir}[/]");
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Training failed");
+            AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+            return 1;
+        }
     }
 }
 
-[Verb("evaluate", HelpText = "Evaluate a trained model")]
+[Verb("evaluate", HelpText = "Evaluate a trained ModL model on a test set")]
 class EvaluateCommand
 {
-    [Value(0, Required = true, HelpText = "Path to trained model")]
+    [Value(0, Required = true, HelpText = "Path to checkpoint directory (contains voxel_enc.bin etc.)")]
     public string ModelPath { get; set; } = string.Empty;
 
-    [Value(1, Required = true, HelpText = "Path to test data")]
-    public string TestData { get; set; } = string.Empty;
+    [Value(1, Required = true, HelpText = "Processed data directory")]
+    public string ProcessedDir { get; set; } = string.Empty;
 
-    public Task<int> ExecuteAsync()
+    [Option("config", HelpText = "Training config JSON (for model dims)")]
+    public string? ConfigFile { get; set; }
+
+    [Option("index", HelpText = "Index file (test.txt) to restrict evaluation")]
+    public string? IndexFile { get; set; }
+
+    [Option("output", HelpText = "Save evaluation JSON to this path")]
+    public string? OutputJson { get; set; }
+
+    [Option("gpu", Default = false, HelpText = "Use CUDA GPU")]
+    public bool Gpu { get; set; }
+
+    public async Task<int> ExecuteAsync()
     {
-        AnsiConsole.MarkupLine("[yellow]Evaluation not yet implemented[/]");
-        return Task.FromResult(0);
+        try
+        {
+            var cfg = ConfigFile != null && File.Exists(ConfigFile)
+                ? TrainingConfig.FromJson(ConfigFile)
+                : new TrainingConfig { ProcessedDir = ProcessedDir };
+
+            var model = new ModLModel(cfg.NumClasses, cfg.VoxelLatentDim, cfg.ViewLatentDim, cfg.EmbeddingDim);
+            model.Load(ModelPath);
+            var device = Gpu ? "cuda" : "cpu";
+            model.ToDevice(new TorchSharp.torch.Device(Gpu ? TorchSharp.DeviceType.CUDA : TorchSharp.DeviceType.CPU));
+
+            var testIdx   = Path.Combine(ProcessedDir, "test.txt");
+            var batchCfg = new TrainingBatchConfig
+            {
+                ProcessedDir    = ProcessedDir,
+                IndexFile       = IndexFile ?? (File.Exists(testIdx) ? testIdx : null),
+                BatchSize       = cfg.BatchSize,
+                VoxelResolution = cfg.VoxelResolution,
+                NumViews        = cfg.NumViews,
+                ViewImageSize   = cfg.ViewImageSize
+            };
+
+            var loader    = new ModelDataLoader(batchCfg);
+            var evaluator = new Evaluator(model, device);
+
+            AnsiConsole.MarkupLine("[green]Evaluating...[/]");
+            var result = await evaluator.EvaluateAsync(loader);
+            result.Print();
+
+            if (OutputJson != null)
+            {
+                result.SaveJson(OutputJson);
+                AnsiConsole.MarkupLine($"[dim]Results saved to {OutputJson}[/]");
+            }
+
+            model.Dispose();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Evaluation failed");
+            AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+            return 1;
+        }
     }
 }
 
-[Verb("export", HelpText = "Export model embeddings")]
+[Verb("export", HelpText = "Export model embeddings to JSON")]
 class ExportCommand
 {
-    [Value(0, Required = true, HelpText = "Path to trained model")]
+    [Value(0, Required = true, HelpText = "Path to checkpoint directory")]
     public string ModelPath { get; set; } = string.Empty;
 
-    [Value(1, Required = true, HelpText = "Path to data directory")]
+    [Value(1, Required = true, HelpText = "Processed data directory")]
     public string DataDir { get; set; } = string.Empty;
 
-    public Task<int> ExecuteAsync()
+    [Option("output", Default = "embeddings.json", HelpText = "Output JSON file path")]
+    public string Output { get; set; } = "embeddings.json";
+
+    [Option("config", HelpText = "Training config JSON")]
+    public string? ConfigFile { get; set; }
+
+    [Option("index", HelpText = "Restrict to models listed in this index file")]
+    public string? IndexFile { get; set; }
+
+    [Option("gpu", Default = false, HelpText = "Use CUDA GPU")]
+    public bool Gpu { get; set; }
+
+    public async Task<int> ExecuteAsync()
     {
-        AnsiConsole.MarkupLine("[yellow]Export not yet implemented[/]");
-        return Task.FromResult(0);
+        try
+        {
+            var cfg = ConfigFile != null && File.Exists(ConfigFile)
+                ? TrainingConfig.FromJson(ConfigFile)
+                : new TrainingConfig { ProcessedDir = DataDir };
+
+            var model = new ModLModel(cfg.NumClasses, cfg.VoxelLatentDim, cfg.ViewLatentDim, cfg.EmbeddingDim);
+            model.Load(ModelPath);
+            model.ToDevice(new TorchSharp.torch.Device(Gpu ? TorchSharp.DeviceType.CUDA : TorchSharp.DeviceType.CPU));
+
+            var batchCfg = new TrainingBatchConfig
+            {
+                ProcessedDir    = DataDir,
+                IndexFile       = IndexFile,
+                BatchSize       = cfg.BatchSize,
+                VoxelResolution = cfg.VoxelResolution,
+                NumViews        = cfg.NumViews,
+                ViewImageSize   = cfg.ViewImageSize
+            };
+
+            var loader    = new ModelDataLoader(batchCfg);
+            var evaluator = new Evaluator(model, Gpu ? "cuda" : "cpu");
+
+            AnsiConsole.MarkupLine($"[green]Exporting embeddings → {Output}[/]");
+            await evaluator.ExportEmbeddingsAsync(loader, Output);
+            AnsiConsole.MarkupLine("[green]✓ Export complete![/]");
+
+            model.Dispose();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Export failed");
+            AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+            return 1;
+        }
     }
 }
 

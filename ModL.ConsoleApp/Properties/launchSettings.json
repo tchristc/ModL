@@ -6,7 +6,7 @@
     },
     "Preprocess": {
       "commandName": "Project",
-      "commandLineArgs": "preprocess ./input ./output --voxel-size 64 --views 12"
+      "commandLineArgs": "preprocess ./input/modelnet ./output/modelnet --voxel-size 64 --views 12"
     },
     "Download Sharpnet": {
       "commandName": "Project",
@@ -23,6 +23,14 @@
     "Catalog modelnet": {
       "commandName": "Project",
       "commandLineArgs": "catalog ./datasets/modelnet --format shapenet"
+    },
+    "Split modelnet": {
+      "commandName": "Project",
+      "commandLineArgs": "split ./001_output"
+    },
+    "Train modelnet": {
+      "commandName": "Project",
+      "commandLineArgs": "train ./001_output --epochs 100 --gpu"
     }
   }
 }
