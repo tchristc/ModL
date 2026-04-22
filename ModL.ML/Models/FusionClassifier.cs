@@ -111,6 +111,11 @@ public sealed class ModLModel : IDisposable
     /// <summary>Moves all sub-networks to <paramref name="device"/>.</summary>
     public ModLModel ToDevice(Device device)
     {
+        if (device.type == TorchSharp.DeviceType.CUDA && !cuda.is_available())
+        {
+            Console.WriteLine("[WARNING] CUDA is not available — falling back to CPU.");
+            device = new Device(TorchSharp.DeviceType.CPU);
+        }
         VoxelEnc.to(device);
         ViewEnc.to(device);
         Fusion.to(device);

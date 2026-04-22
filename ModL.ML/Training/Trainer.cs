@@ -255,9 +255,19 @@ public sealed class Trainer
         if (lower == "cpu")
             return new Device(TorchSharp.DeviceType.CPU);
         if (lower is "cuda" or "gpu")
-            return new Device(TorchSharp.DeviceType.CUDA);
+            return ResolveCudaOrFallback();
         if (lower.StartsWith("cuda:"))
-            return new Device(TorchSharp.DeviceType.CUDA, int.Parse(lower["cuda:".Length..]));
+            return ResolveCudaOrFallback(int.Parse(lower["cuda:".Length..]));
+        return new Device(TorchSharp.DeviceType.CPU);
+    }
+
+    private static Device ResolveCudaOrFallback(int index = -1)
+    {
+        if (cuda.is_available())
+            return index >= 0
+                ? new Device(TorchSharp.DeviceType.CUDA, index)
+                : new Device(TorchSharp.DeviceType.CUDA);
+        Console.WriteLine("[WARNING] CUDA is not available — falling back to CPU.");
         return new Device(TorchSharp.DeviceType.CPU);
     }
 
