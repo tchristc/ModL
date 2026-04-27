@@ -30,7 +30,35 @@
     },
     "Train modelnet": {
       "commandName": "Project",
-      "commandLineArgs": "train ./001_output --epochs 100 --gpu"
+      "commandLineArgs": "train config.json"
+      //"commandLineArgs": "train ./001_output --epochs 100 --gpu"
+    },
+    "Evaluate": {
+      "commandName": "Project",
+      "commandLineArgs": "evaluate ./checkpoints/best ./001_output --output results.json"
+    },
+    "Export Embeddings": {
+      "commandName": "Project",
+      "commandLineArgs": "export ./checkpoints/best ./001_output --output embeddings.json"
     }
   }
-}
+
+//# 1 — Preprocess
+//modl preprocess C:\data\modelnet C:\data\processed --voxel-size 64 --views 12
+
+//# 2 — Split
+//modl split C:\data\processed
+
+//# 3 — Train (using a config file OR just pointing at the processed dir)
+//modl train C:\data\processed --epochs 100 --gpu
+
+//# 4 — Evaluate
+//modl evaluate C:\data\checkpoints\best C:\data\processed --output results.json
+
+//# 5 — Export embeddings
+//modl export C:\data\checkpoints\best C:\data\processed --output embeddings.json
+
+//# 6 — Generate (ModL.Generator)
+//modl-gen generate "a wooden chair" --model C:\data\checkpoints\best --embeddings embeddings.json --processed C:\data\processed --top 5
+//modl-gen retrieve chair_001 --embeddings embeddings.json --top 10
+//modl-gen inspect-embedding embeddings.json

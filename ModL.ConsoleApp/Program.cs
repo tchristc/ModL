@@ -333,9 +333,25 @@ class EvaluateCommand
     {
         try
         {
-            var cfg = ConfigFile != null && File.Exists(ConfigFile)
-                ? TrainingConfig.FromJson(ConfigFile)
-                : new TrainingConfig { ProcessedDir = ProcessedDir };
+            // First try checkpoint dir, then --config, finally defaults
+            var checkpointConfig = Path.Combine(ModelPath, "config.json");
+            TrainingConfig cfg;
+
+            if (File.Exists(checkpointConfig))
+            {
+                cfg = TrainingConfig.FromJson(checkpointConfig);
+                AnsiConsole.MarkupLine($"[dim]Loaded config from checkpoint: {checkpointConfig}[/]");
+            }
+            else if (ConfigFile != null && File.Exists(ConfigFile))
+            {
+                cfg = TrainingConfig.FromJson(ConfigFile);
+                AnsiConsole.MarkupLine($"[yellow]Warning: Using --config instead of checkpoint config[/]");
+            }
+            else
+            {
+                cfg = new TrainingConfig { ProcessedDir = ProcessedDir };
+                AnsiConsole.MarkupLine("[yellow]Warning: No config found — using defaults (may mismatch!)[/]");
+            }
 
             var model = new ModLModel(cfg.NumClasses, cfg.VoxelLatentDim, cfg.ViewLatentDim, cfg.EmbeddingDim);
             model.Load(ModelPath);
@@ -403,9 +419,25 @@ class ExportCommand
     {
         try
         {
-            var cfg = ConfigFile != null && File.Exists(ConfigFile)
-                ? TrainingConfig.FromJson(ConfigFile)
-                : new TrainingConfig { ProcessedDir = DataDir };
+            // First try checkpoint dir, then --config, finally defaults
+            var checkpointConfig = Path.Combine(ModelPath, "config.json");
+            TrainingConfig cfg;
+
+            if (File.Exists(checkpointConfig))
+            {
+                cfg = TrainingConfig.FromJson(checkpointConfig);
+                AnsiConsole.MarkupLine($"[dim]Loaded config from checkpoint: {checkpointConfig}[/]");
+            }
+            else if (ConfigFile != null && File.Exists(ConfigFile))
+            {
+                cfg = TrainingConfig.FromJson(ConfigFile);
+                AnsiConsole.MarkupLine($"[yellow]Warning: Using --config instead of checkpoint config[/]");
+            }
+            else
+            {
+                cfg = new TrainingConfig { ProcessedDir = DataDir };
+                AnsiConsole.MarkupLine("[yellow]Warning: No config found — using defaults (may mismatch!)[/]");
+            }
 
             var model = new ModLModel(cfg.NumClasses, cfg.VoxelLatentDim, cfg.ViewLatentDim, cfg.EmbeddingDim);
             model.Load(ModelPath);

@@ -73,6 +73,11 @@ public sealed class Trainer
 
         Directory.CreateDirectory(_cfg.CheckpointDir);
 
+        // Save config alongside checkpoints for reproducibility
+        var configPath = Path.Combine(_cfg.CheckpointDir, "config.json");
+        if (!File.Exists(configPath))
+            _cfg.SaveJson(configPath);
+
         // ── Epoch loop ────────────────────────────────────────────────────
         for (int epoch = startEpoch; epoch < _cfg.Epochs; epoch++)
         {

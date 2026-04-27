@@ -1,0 +1,32 @@
+{
+  "ProcessedDir": "C:\\data\\processed",
+  "TrainIndexFile": "C:\\data\\processed\\train.txt",
+  "ValIndexFile": "C:\\data\\processed\\val.txt",
+  "TestIndexFile": "C:\\data\\processed\\test.txt",
+
+  "NumClasses": 40,
+  "VoxelLatentDim": 256,
+  "ViewLatentDim": 256,
+  "EmbeddingDim": 512,
+  "Dropout": 0.4,
+
+  "VoxelResolution": 64,
+  "NumViews": 12,
+  "ViewImageSize": 128,
+
+  "Epochs": 100,
+  "BatchSize": 32,
+  "LearningRate": 0.001,
+  "WeightDecay": 0.0001,
+
+  "LrSchedule": "cosine",
+  "LrStepGamma": 0.5,
+  "LrStepEvery": 20,
+
+  "Augment": true,
+  "Device": "cuda",
+
+  "CheckpointDir": "C:\\data\\checkpoints",
+  "ResumeFrom": null,
+  "SaveEveryEpochs": 10
+}
